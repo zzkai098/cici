@@ -1,0 +1,17 @@
+[project]
+name = "cici"
+version = "0.1.0"
+description = "A coding-agent CLI in Python — a minimal Claude Code, built from scratch."
+requires-python = ">=3.9"
+dependencies = [
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
+    "prompt_toolkit>=3.0",
+]
+
+[project.scripts]
+cici = "cici.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
