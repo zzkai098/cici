@@ -11,10 +11,14 @@ Pinned to anthropic 1.x. Things 1.x removed that 0.x-era code (cici_101) used:
   - httpx objects handed to the SDK must come from httpx2 (we hand it none).
 """
 
-import os
+from pathlib import Path
 
-from anthropic import Anthropic
+from anthropic import Anthropic, AnthropicError
 from dotenv import load_dotenv
+
+# cici is meant to be run inside OTHER projects, so .env.local is resolved
+# against the repo root, never the cwd.
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env.local"
 
 DEFAULT_MODEL = "claude-opus-5"
 # Streaming has no HTTP-timeout pressure, so give a coding agent real room.
@@ -23,12 +27,17 @@ DEFAULT_MAX_TOKENS = 64000
 
 class AnthropicProvider:
     def __init__(self, model=DEFAULT_MODEL, max_tokens=DEFAULT_MAX_TOKENS):
-        load_dotenv(".env.local")
-        if not os.getenv("ANTHROPIC_API_KEY"):
+        load_dotenv(_ENV_FILE)
+        # Don't gate on ANTHROPIC_API_KEY: the SDK also accepts
+        # ANTHROPIC_AUTH_TOKEN and an OAuth profile from `ant auth login`.
+        # Let it resolve credentials, and translate its error into one line.
+        try:
+            self.client = Anthropic()
+        except (AnthropicError, TypeError) as e:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY not set. cp .env.local.example .env.local and fill it in."
-            )
-        self.client = Anthropic()
+                f"no Anthropic credentials found ({e}). "
+                f"Put ANTHROPIC_API_KEY in {_ENV_FILE}, export it, or run `ant auth login`."
+            ) from e
         self.model = model
         self.max_tokens = max_tokens
 

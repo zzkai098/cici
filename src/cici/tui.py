@@ -86,5 +86,14 @@ def describe_tool_input(tool_input):
     return ", ".join(f"{k}={v!r}" for k, v in tool_input.items()) or "(empty)"
 
 
+def dim_open():
+    """Open a dim span — no-op when not a TTY so piped output stays clean."""
+    return DIM if _tty() else ""
+
+
+def dim_close():
+    return RESET if _tty() else ""
+
+
 def rule(width=50):
     print("\n" + "─" * width)

@@ -7,11 +7,11 @@ reimplemented in Python.
 
 | pi package | cici module | responsibility |
 |---|---|---|
-| `pi-ai` | `cici/llm.py` | unified LLM layer (Anthropic first, provider seam kept) |
-| `pi-agent-core` | `cici/agent.py`, `cici/session.py` | agent loop, tool calling, state |
-| `pi-coding-agent` | `cici/cli/repl.py` | interactive CLI |
-| `pi-tui` | `cici/tui.py` | terminal rendering |
-| `pi-telemetry` | `cici/telemetry.py` | per-turn telemetry |
+| `pi-ai` | `src/cici/llm.py` | unified LLM layer (Anthropic first, provider seam kept) |
+| `pi-agent-core` | `src/cici/agent.py`, `src/cici/session.py` | agent loop, tool calling, state |
+| `pi-coding-agent` | `src/cici/cli/repl.py` | interactive CLI |
+| `pi-tui` | `src/cici/tui.py` | terminal rendering |
+| `pi-telemetry` | `src/cici/telemetry.py` | per-turn telemetry |
 
 ## Quickstart
 

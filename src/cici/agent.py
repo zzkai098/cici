@@ -33,6 +33,7 @@ class Agent:
         self.max_turns = max_turns
         self.server_tools = server_tools or []
         self.telemetry = Recorder()
+        self._in_thinking = False
 
     def _tools(self):
         return self.registry.schemas(extra=self.server_tools)
@@ -43,6 +44,7 @@ class Agent:
         for _ in range(self.max_turns):
             turn = self.telemetry.begin()
             spinner = tui.Tentacles()
+            self._in_thinking = False
             spinner.start("thinking…")
 
             with self.provider.stream(
@@ -55,6 +57,7 @@ class Agent:
                         self._on_chunk(chunk, spinner)
                 finally:
                     spinner.stop()
+                    self._end_thinking()
                 response = stream.get_final_message()
 
             self.telemetry.end(turn, response)
@@ -71,12 +74,17 @@ class Agent:
 
     def _on_chunk(self, chunk, spinner):
         if chunk.type == "text":
+            self._end_thinking()
             spinner.stop()
             print(chunk.text, end="", flush=True)
             return
 
+        # The stream helper synthesises a `thinking` event per delta, exactly as
+        # it does for `text`. Do NOT also handle content_block_delta /
+        # thinking_delta — the helper emits both for the same content, and
+        # handling both prints every delta twice, interleaved.
         if chunk.type == "thinking":
-            spinner.start("thinking…")
+            self._write_thinking(getattr(chunk, "thinking", "") or "", spinner)
             return
 
         if chunk.type == "content_block_start":
@@ -84,6 +92,7 @@ class Agent:
             if block.type == "thinking":
                 spinner.start("thinking…")
             elif block.type == "tool_use":
+                self._end_thinking()
                 spinner.stop()
                 print(f"\n[tool] {block.name}", end="", flush=True)
             elif block.type == "server_tool_use":
@@ -95,11 +104,40 @@ class Agent:
             block = getattr(chunk, "content_block", None)
             if block is None:
                 return
-            if block.type == "tool_use":
+            if block.type == "thinking":
+                self._end_thinking()
+                spinner.start("thinking…")
+            elif block.type == "tool_use":
                 args = tui.describe_tool_input(block.input) if block.input else ""
                 print(f"({args})", flush=True)
             elif block.type == "server_tool_use":
+                self._end_thinking()
                 spinner.stop()
                 label = block.name
                 print(f"\n[{label}] {tui.describe_tool_input(block.input)}", flush=True)
                 spinner.start("working…")
+
+    def _write_thinking(self, text, spinner):
+        """Render the summarised reasoning dimmed, so it reads as an aside.
+
+        We pay for thinking tokens either way and asked for display=summarized,
+        so throwing the summary away would be wasting what we bought.
+        """
+        if not text:
+            return
+        if not self._in_thinking:
+            spinner.stop()
+            print(f"\n{tui.dim_open()}  ~ ", end="", flush=True)
+            self._in_thinking = True
+            self._thinking_blank = False
+        # The summary carries its own line breaks; indent continuations so the
+        # aside stays visually attached, and don't echo blank-line padding.
+        if not text.strip() and self._thinking_blank:
+            return
+        self._thinking_blank = not text.strip()
+        print(text.replace("\n", "\n    "), end="", flush=True)
+
+    def _end_thinking(self):
+        if getattr(self, "_in_thinking", False):
+            print(tui.dim_close(), flush=True)
+            self._in_thinking = False
