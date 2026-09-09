@@ -8,7 +8,7 @@ def main():
         run()
     except RuntimeError as e:
         # Known, actionable setup failures get a clean line, not a traceback.
-        print("cici: {}".format(e), file=sys.stderr)
+        print(f"cici: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print()

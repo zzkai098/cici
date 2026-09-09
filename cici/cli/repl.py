@@ -5,10 +5,11 @@ cici_101/cli_project/core/cli.py — /command completion with descriptions,
 @resource mentions, custom key bindings that pop completion on / or @.
 For now this is a plain input() loop so the spine runs end to end.
 """
+
 import os
 
 from .. import tui
-from ..agent import Agent, SYSTEM_PROMPT
+from ..agent import SYSTEM_PROMPT, Agent
 from ..llm import AnthropicProvider
 from ..session import Session
 from ..tools import default_registry

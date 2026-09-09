@@ -6,7 +6,7 @@ TODO (roadmap 3): persistence to .cici/sessions/, context window management
 """
 
 
-class Session(object):
+class Session:
     def __init__(self, system_prompt=""):
         self.system_prompt = system_prompt
         self.messages = []

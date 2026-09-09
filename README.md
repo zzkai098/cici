@@ -16,11 +16,14 @@ reimplemented in Python.
 ## Quickstart
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+uv sync                            # creates .venv, installs deps + the project
 cp .env.local.example .env.local   # fill in ANTHROPIC_API_KEY
-python -m cici
+uv run cici
 ```
+
+Managed with [uv](https://docs.astral.sh/uv/). `uv sync` pins the Python version
+(3.12, from `.python-version`) and resolves against `uv.lock`, so the environment
+is reproducible — no "works on my machine".
 
 ## Status
 

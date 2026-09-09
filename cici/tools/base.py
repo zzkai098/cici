@@ -4,15 +4,17 @@ Schemas are hand-written on purpose — per-parameter descriptions are where too
 reliability actually comes from, and an interviewer can ask about them. Do not
 swap this for auto-generation from type hints.
 """
+
 import json
+from typing import ClassVar
 
 
-class Tool(object):
+class Tool:
     """Subclass, set name/description/input_schema, implement run()."""
 
     name = ""
     description = ""
-    input_schema = {"type": "object", "properties": {}, "required": []}
+    input_schema: ClassVar[dict] = {"type": "object", "properties": {}, "required": []}
 
     def run(self, **kwargs):
         raise NotImplementedError
@@ -25,7 +27,7 @@ class Tool(object):
         }
 
 
-class Registry(object):
+class Registry:
     def __init__(self):
         self._tools = {}
 
@@ -42,7 +44,7 @@ class Registry(object):
     def dispatch(self, name, tool_input):
         tool = self._tools.get(name)
         if tool is None:
-            raise KeyError("unknown tool: {}".format(name))
+            raise KeyError(f"unknown tool: {name}")
         return tool.run(**(tool_input or {}))
 
     def run_all(self, message):
@@ -55,17 +57,23 @@ class Registry(object):
         for req in [b for b in message.content if b.type == "tool_use"]:
             try:
                 output = self.dispatch(req.name, req.input)
-                blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": req.id,
-                    "content": output if isinstance(output, str) else json.dumps(output),
-                    "is_error": False,
-                })
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": req.id,
+                        "content": output
+                        if isinstance(output, str)
+                        else json.dumps(output),
+                        "is_error": False,
+                    }
+                )
             except Exception as e:  # noqa: BLE001 - containment is the point
-                blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": req.id,
-                    "content": "Error: {}".format(e),
-                    "is_error": True,
-                })
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": req.id,
+                        "content": f"Error: {e}",
+                        "is_error": True,
+                    }
+                )
         return blocks

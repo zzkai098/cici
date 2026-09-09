@@ -7,12 +7,20 @@ TODO (roadmap 2): once prompt caching lands, add the cache hit rate —
     usage.cache_read_input_tokens / (cache_read + input)
 That is what turns "context management" from a claim into a defensible number.
 """
+
 import time
 
 
-class Turn(object):
-    __slots__ = ("index", "stop_reason", "n_tools", "latency_s",
-                 "input_tokens", "output_tokens", "cache_read_tokens")
+class Turn:
+    __slots__ = (
+        "cache_read_tokens",
+        "index",
+        "input_tokens",
+        "latency_s",
+        "n_tools",
+        "output_tokens",
+        "stop_reason",
+    )
 
     def __init__(self, index):
         self.index = index
@@ -25,21 +33,21 @@ class Turn(object):
 
     def line(self):
         parts = [
-            "[turn {}]".format(self.index),
-            "stop={}".format(self.stop_reason),
-            "tools={}".format(self.n_tools),
-            "{:.1f}s".format(self.latency_s),
+            f"[turn {self.index}]",
+            f"stop={self.stop_reason}",
+            f"tools={self.n_tools}",
+            f"{self.latency_s:.1f}s",
         ]
         if self.input_tokens or self.output_tokens:
-            parts.append("in={} out={}".format(self.input_tokens, self.output_tokens))
+            parts.append(f"in={self.input_tokens} out={self.output_tokens}")
         if self.cache_read_tokens:
             denom = self.cache_read_tokens + self.input_tokens
             if denom:
-                parts.append("cache={:.0%}".format(self.cache_read_tokens / float(denom)))
+                parts.append(f"cache={self.cache_read_tokens / float(denom):.0%}")
         return " ".join(parts)
 
 
-class Recorder(object):
+class Recorder:
     def __init__(self):
         self.turns = []
         self._t0 = None

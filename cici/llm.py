@@ -3,17 +3,25 @@
 Only Anthropic is implemented. The seam is here so a second provider can be
 added without the agent loop knowing — do not let provider-specific types leak
 into agent.py beyond the content-block shapes the loop already handles.
+
+Pinned to anthropic 1.x. Things 1.x removed that 0.x-era code (cici_101) used:
+  - temperature / top_p / top_k are gone from messages.create/.stream (TypeError).
+  - assistant prefill returns 400 on every current model. To force structured
+    output, use output_config={"format": {...}} — not prefill + stop_sequence.
+  - httpx objects handed to the SDK must come from httpx2 (we hand it none).
 """
+
 import os
 
-from dotenv import load_dotenv
 from anthropic import Anthropic
+from dotenv import load_dotenv
 
-DEFAULT_MODEL = "claude-sonnet-5"
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MODEL = "claude-opus-5"
+# Streaming has no HTTP-timeout pressure, so give a coding agent real room.
+DEFAULT_MAX_TOKENS = 64000
 
 
-class AnthropicProvider(object):
+class AnthropicProvider:
     def __init__(self, model=DEFAULT_MODEL, max_tokens=DEFAULT_MAX_TOKENS):
         load_dotenv(".env.local")
         if not os.getenv("ANTHROPIC_API_KEY"):
@@ -30,6 +38,10 @@ class AnthropicProvider(object):
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": messages,
+            # Adaptive thinking is the only on-mode on current models; budget_tokens
+            # is a 400. display defaults to "omitted", which reads as a dead pause —
+            # ask for the summary so the CLI has something to show.
+            "thinking": {"type": "adaptive", "display": "summarized"},
         }
         if system:
             # TODO (roadmap 2): cache_control breakpoint on the system prompt.

@@ -2,9 +2,9 @@
 name = "cici"
 version = "0.1.0"
 description = "A coding-agent CLI in Python — a minimal Claude Code, built from scratch."
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=0.40",
+    "anthropic>=1,<2",
     "python-dotenv>=1.0",
     "prompt_toolkit>=3.0",
 ]
@@ -18,3 +18,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["cici*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]

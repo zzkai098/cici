@@ -13,6 +13,7 @@ Known streaming gotchas (already paid for once in cici_101):
   - web_search_20260209 also grants code_execution, so dispatch on block.name
     rather than assuming search.
 """
+
 from . import tui
 from .telemetry import Recorder
 
@@ -24,7 +25,7 @@ few sentences unless the user asks for more.
 """
 
 
-class Agent(object):
+class Agent:
     def __init__(self, provider, registry, session, max_turns=20, server_tools=None):
         self.provider = provider
         self.registry = registry
@@ -65,7 +66,7 @@ class Agent(object):
                 break
             self.session.add_user(self.registry.run_all(response))
         else:
-            print("\n[stopped: reached {} turns]".format(self.max_turns))
+            print(f"\n[stopped: reached {self.max_turns} turns]")
         return response
 
     def _on_chunk(self, chunk, spinner):
@@ -74,11 +75,17 @@ class Agent(object):
             print(chunk.text, end="", flush=True)
             return
 
+        if chunk.type == "thinking":
+            spinner.start("thinking…")
+            return
+
         if chunk.type == "content_block_start":
             block = chunk.content_block
-            if block.type == "tool_use":
+            if block.type == "thinking":
+                spinner.start("thinking…")
+            elif block.type == "tool_use":
                 spinner.stop()
-                print("\n[tool] {}".format(block.name), end="", flush=True)
+                print(f"\n[tool] {block.name}", end="", flush=True)
             elif block.type == "server_tool_use":
                 # input is still {} here — it only lands at block stop
                 spinner.start("working…")
@@ -90,9 +97,9 @@ class Agent(object):
                 return
             if block.type == "tool_use":
                 args = tui.describe_tool_input(block.input) if block.input else ""
-                print("({})".format(args), flush=True)
+                print(f"({args})", flush=True)
             elif block.type == "server_tool_use":
                 spinner.stop()
                 label = block.name
-                print("\n[{}] {}".format(label, tui.describe_tool_input(block.input)), flush=True)
+                print(f"\n[{label}] {tui.describe_tool_input(block.input)}", flush=True)
                 spinner.start("working…")

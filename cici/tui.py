@@ -3,6 +3,7 @@
 Terminal output is plain text — markdown renders as literal characters here,
 so no bold, no headers, no bullet syntax.
 """
+
 import sys
 import threading
 
@@ -26,10 +27,7 @@ def _tty():
 class Tentacles:
     """Jellyfish tentacles that drift while we wait on the model or a tool."""
 
-    FRAMES = ("∿  ∿  ∿  ∿  ∿",
-              " ∿  ∿  ∿  ∿  ∿",
-              "  ∿  ∿  ∿  ∿  ∿",
-              " ∿  ∿  ∿  ∿  ∿")
+    FRAMES = ("∿  ∿  ∿  ∿  ∿", " ∿  ∿  ∿  ∿  ∿", "  ∿  ∿  ∿  ∿  ∿", " ∿  ∿  ∿  ∿  ∿")
 
     def __init__(self, label=""):
         self.label = label
@@ -49,8 +47,7 @@ class Tentacles:
         i = 0
         while not self._stop.is_set():
             frame = self.FRAMES[i % len(self.FRAMES)]
-            sys.stdout.write("\r{}  {}{} {}{}{}\033[K".format(
-                CYAN, frame, RESET, DIM, self.label, RESET))
+            sys.stdout.write(f"\r{CYAN}  {frame}{RESET} {DIM}{self.label}{RESET}\033[K")
             sys.stdout.flush()
             i += 1
             self._stop.wait(0.15)
@@ -70,9 +67,9 @@ def banner(model):
     cyan = CYAN if _tty() else ""
     dim = DIM if _tty() else ""
     reset = RESET if _tty() else ""
-    print("{}{}{}".format(cyan, JELLYFISH, reset))
+    print(f"{cyan}{JELLYFISH}{reset}")
     print("  Hi, I'm cici, how can I help you today :D")
-    print("{}  {} · Ctrl-C to exit{}\n".format(dim, model, reset))
+    print(f"{dim}  {model} · Ctrl-C to exit{reset}\n")
 
 
 def describe_tool_input(tool_input):
@@ -86,7 +83,7 @@ def describe_tool_input(tool_input):
         val = tool_input.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
-    return ", ".join("{}={!r}".format(k, v) for k, v in tool_input.items()) or "(empty)"
+    return ", ".join(f"{k}={v!r}" for k, v in tool_input.items()) or "(empty)"
 
 
 def rule(width=50):
