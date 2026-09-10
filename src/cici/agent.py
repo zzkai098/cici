@@ -1,6 +1,8 @@
 """Agent loop (pi-agent-core equivalent).
 
 Ported and restructured from cici_101/webagent_stream.py::run_conversation_stream.
+The method shape — run(query) plus a _process_query hook a subclass overrides —
+comes from cici_101/cli_project/core/chat.py::Chat.
 
 Two invariants this loop exists to hold:
   1. Error containment — a tool exception becomes an is_error tool_result, never
@@ -38,8 +40,24 @@ class Agent:
     def _tools(self):
         return self.registry.schemas(extra=self.server_tools)
 
-    def run(self):
-        """Drive turns until the model stops asking for tools."""
+    async def _process_query(self, query):
+        """Turn raw user input into the messages this turn starts from.
+
+        Subclasses override this to inject context before the model sees it.
+        That is the landing spot for @file mentions (roadmap 3), the same way
+        cici_101/cli_project/core/cli_chat.py::CliChat overrides it to splice in
+        <document id="..."> blocks.
+        """
+        self.session.add_user(query)
+
+    async def run(self, query):
+        """Drive turns until the model stops asking for tools.
+
+        Returns the final assistant text. That return value is for programmatic
+        callers — evals, sub-agents — NOT for the REPL: _on_chunk has already
+        streamed the same text to stdout, so printing it again double-prints.
+        """
+        await self._process_query(query)
         response = None
         for _ in range(self.max_turns):
             turn = self.telemetry.begin()
@@ -47,18 +65,18 @@ class Agent:
             self._in_thinking = False
             spinner.start("thinking…")
 
-            with self.provider.stream(
+            async with self.provider.stream(
                 self.session.messages,
                 system=self.session.system_prompt or SYSTEM_PROMPT,
                 tools=self._tools(),
             ) as stream:
                 try:
-                    for chunk in stream:
+                    async for chunk in stream:
                         self._on_chunk(chunk, spinner)
                 finally:
                     spinner.stop()
                     self._end_thinking()
-                response = stream.get_final_message()
+                response = await stream.get_final_message()
 
             self.telemetry.end(turn, response)
             tui.rule()
@@ -67,11 +85,13 @@ class Agent:
             self.session.add_assistant(response)
             if response.stop_reason != "tool_use":
                 break
-            self.session.add_user(self.registry.run_all(response))
+            self.session.add_user(await self.registry.run_all(response))
         else:
             print(f"\n[stopped: reached {self.max_turns} turns]")
-        return response
+        return self.provider.text_from_message(response) if response else ""
 
+    # The chunk handlers stay synchronous on purpose: they only write strings to
+    # stdout. Making them coroutines would add a scheduler hop per delta.
     def _on_chunk(self, chunk, spinner):
         if chunk.type == "text":
             self._end_thinking()

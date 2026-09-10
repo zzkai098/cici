@@ -2,13 +2,16 @@
 
 from typing import ClassVar
 
-from .base import Tool
+from .base import SyncTool
 
 
-class LsTool(Tool):
+class LsTool(SyncTool):
     name = "ls"
     description = "List a directory. TODO: hand-write the full schema, per-parameter descriptions included."
     input_schema: ClassVar[dict] = {"type": "object", "properties": {}, "required": []}
+    # Read-only: safe to gather with other read-only tools once
+    # Registry.run_all learns to batch them.
+    parallel_safe = True
 
-    def run(self, **kwargs):
+    def _run(self, **kwargs):
         raise NotImplementedError("ls tool not implemented yet")

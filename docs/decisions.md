@@ -73,9 +73,70 @@
 - `web_search_20260209` 同时授予 `code_execution`，要按 `block.name` 分派，不能假定是 search
 - spinner 停止时必须 `\r\033[K` 擦行，否则真实输出会叠在动画上
 
+## 8. harness 改成 async（2026-09-10）
+
+参照 `cici_101/cli_project/`，但那个 repo async 的**理由是 MCP**——`core/tools.py::ToolManager` 每个 `await` 都是 MCP 网络往返。cici 不接 MCP，所以借的是它的类/方法形状，不是它的分层。
+
+不接 MCP 的话，async 买到的是三样，都对着已排好的 roadmap：
+
+1. **bash 的真超时与可取消**（roadmap 1）。`subprocess.run(timeout=)` 期间整个进程干等；`asyncio.create_subprocess_exec` + `asyncio.timeout` 才有 kill 路径。
+2. **trajectory eval 的并发**（roadmap 4）。一组任务 `asyncio.gather` + `Semaphore`，入口就是 `Agent.run(query)`。
+3. **prompt_toolkit**（roadmap 3）。`PromptSession.prompt_async` 本来就要求 event loop。
+
+**`llm.py` 几乎没动。** `AsyncAnthropic().messages.stream()` 是**普通 `def`**，返回 `AsyncMessageStreamManager`（不是 coroutine），所以 `stream()` 的签名和 params 组装一个字都没改，只是 `Anthropic` → `AsyncAnthropic` 加一个 `aclose()`（异步 client 不像同步版能被 GC 兜底关连接池）。
+
+`AnthropicProvider` 改名 `Claude`，对齐 `cici_101/cli_project/core/claude.py`；`text_from_message` 也从那里搬过来。但 `add_user_message` / `add_assistant_message` **没有**搬——cici_101 把它们挂在 Claude 上只是因为那个 repo 没有会话对象，cici 的消息历史归 `Session` 管，这正是 roadmap 3 的前提。
+
+**从 cli_project 明确不借的**：`ToolManager._find_client_with_tool` 每次工具调用都遍历 client 做一次 `list_tools()` 网络往返来路由工具名，字典查找严格更好；而且 `core/tools.py:100` 的 `except` 分支引用了可能未绑定的 `tool_output`（NameError）。
+
+## 9. 工具契约定成 async——趁工具还没写
+
+`Tool.run` 是 `async def`。纯本地阻塞 I/O 的工具继承 `SyncTool`，只写同步 `_run`，基类用 `asyncio.to_thread` 包一层。
+
+时机是理由：改这条契约的时候 6 个工具全是 `NotImplementedError`，成本是零；等 roadmap 1 写完 4 个再改就是 4 处返工。
+
+**`except Exception` 必须保持是 `Exception`，不许改成 `BaseException`。** `asyncio.CancelledError` 继承自 `BaseException`，所以取消会正确穿透出去，不会被包成一个假的 `is_error` tool_result；而 bash 超时抛的 `TimeoutError` 属于 `Exception`，会被正常包成 `is_error` 回传给模型。这个分工是免费拿到的，改成 `BaseException` 就把取消吞了。
+
+顺带修了一个：`TimeoutError` 的 `str()` 是空的，原来的 `f"Error: {e}"` 会给模型回一句 `Error: `。改成 `f"Error: {str(e) or type(e).__name__}"`。
+
+## 10. `repl.py` 用 `asyncio.Runner`，不是 `asyncio.run`
+
+**两条看起来更自然的写法都实测会让 Ctrl-C 挂死。** 在真 pty 上对照过（fifo/管道测不出来，管道下连改动前的同步 `input()` 都挂）：
+
+| 形态 | Ctrl-C 结果 |
+|---|---|
+| 改动前的同步 `input()` | 干净退出 |
+| `asyncio.run(main())` + 循环内 `input()` | **挂死** |
+| `asyncio.Runner` + 循环外 `input()` | 干净退出 |
+
+原因在 CPython 的 `asyncio/runners.py`：`Runner.run()` 会安装自己的 SIGINT handler，**第一次** Ctrl-C 是 `main_task.cancel()` 而不是抛 `KeyboardInterrupt`。主任务卡在同步 `input()` 里，取消永远送不进去，要按第二次才出得来。
+
+`asyncio.Runner` 只在每次 `run()` 期间接管 SIGINT，提示符那一刻 handler 已经还原成默认的，行为跟改动前完全一致；同时一个 loop 跨多轮复用，`AsyncAnthropic` 的连接池不会因为换 loop 而失效。
+
+**`input()` 也不能包 `asyncio.to_thread`。** Ctrl-C 的信号处理器跑在主线程，worker 里的 `input()` 按 PEP 475 只会重试 read 而不返回；`asyncio.run` 收尾时 `shutdown_default_executor()` 会去 join 这个永远不返回的线程，一样挂死。
+
+等 roadmap 3 接上 prompt_toolkit，`await session.prompt_async("> ")` 从 loop 内部接管 stdin 并自己处理 Ctrl-C，那时 `repl.run()` 才变回 `async def`，Runner 就可以去掉。
+
+## 11. 这台机器上 editable 安装失效的真正原因：macOS `UF_HIDDEN`
+
+`uv run cici` 报 `ModuleNotFoundError: No module named 'cici'`，`.pth` 内容和路径都对。
+
+真实原因：uv 写进 `.venv/lib/python3.12/site-packages/` 的**每一个条目都带 macOS `UF_HIDDEN` 标志**（`ls -lO` 能看到 `hidden`），而 Python 3.12 的 `site.addpackage` 里有这么一段——
+
+```python
+if ((getattr(st, 'st_flags', 0) & stat.UF_HIDDEN) or ...):
+    _trace(f"Skipping hidden .pth file: {fullname!r}")
+    return
+```
+
+**hidden 的 `.pth` 被静默跳过**，所以 `src` 从来没进过 `sys.path`。这跟 setuptools / flat layout / `__editable__` finder 都没关系——之前归因错了。普通包不受影响（import 机制不看 flags），只有 `.pth` 这条路径检查。
+
+临时解法 `chflags nohidden .venv/lib/python3.12/site-packages/*.pth`，但 uv 重新同步后会被重新打上。稳的验证方式是 `PYTHONPATH=src .venv/bin/python -m cici`。**这个还没有根治方案**，见下面。
+
 ---
 
 ## 还没做的决定
 
 - **推 GitHub** —— 现在是本地 repo，没有 remote。`gh repo create cici --private --source=. --push`，公开前先过一遍内容。
-- **prompt_toolkit REPL** —— 现在是最小 `input()` 循环。`cici_101/cli_project/core/cli.py` 有现成的（`/命令` 补全、`@资源` mention、自定义 key bindings）。
+- **prompt_toolkit REPL** —— 现在是最小 `input()` 循环。`cici_101/cli_project/core/cli.py` 有现成的（`/命令` 补全、`@资源` mention、自定义 key bindings）。接上之后 `repl.run()` 变回 `async def`，`asyncio.Runner` 可以撤掉。
+- **`UF_HIDDEN` 导致 editable 安装失效怎么根治**（见 §11）—— 现在每次 uv 重新同步后都要手动 `chflags nohidden`。候选：升级 uv 看是否已修、或加一条 sync 后的 post 步骤、或干脆在 `uv run` 之外统一用 `PYTHONPATH=src`。

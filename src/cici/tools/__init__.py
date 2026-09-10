@@ -10,7 +10,7 @@ Port targets:
                 _validate_path, _backup_file/_restore_backup, _count_matches
 """
 
-from .base import Registry, Tool  # noqa: F401
+from .base import Registry, SyncTool, Tool  # noqa: F401
 
 
 def default_registry():

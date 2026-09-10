@@ -4,6 +4,10 @@ Only Anthropic is implemented. The seam is here so a second provider can be
 added without the agent loop knowing — do not let provider-specific types leak
 into agent.py beyond the content-block shapes the loop already handles.
 
+Async because the harness above it is async. `Claude.stream()` is deliberately
+NOT a coroutine: the SDK's `messages.stream()` is a plain method returning an
+async context manager, so the seam keeps the same signature it had when sync.
+
 Pinned to anthropic 1.x. Things 1.x removed that 0.x-era code (cici_101) used:
   - temperature / top_p / top_k are gone from messages.create/.stream (TypeError).
   - assistant prefill returns 400 on every current model. To force structured
@@ -13,7 +17,7 @@ Pinned to anthropic 1.x. Things 1.x removed that 0.x-era code (cici_101) used:
 
 from pathlib import Path
 
-from anthropic import Anthropic, AnthropicError
+from anthropic import AnthropicError, AsyncAnthropic
 from dotenv import load_dotenv
 
 # cici is meant to be run inside OTHER projects, so .env.local is resolved
@@ -25,14 +29,23 @@ DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_MAX_TOKENS = 64000
 
 
-class AnthropicProvider:
+class Claude:
+    """Anthropic implementation of the LLM seam.
+
+    Named after cici_101/cli_project/core/claude.py::Claude, which plays the
+    same role there. The message-history helpers that class carried live on
+    session.py::Session here — cici_101 hung them off Claude only because it
+    had no conversation object.
+    """
+
     def __init__(self, model=DEFAULT_MODEL, max_tokens=DEFAULT_MAX_TOKENS):
         load_dotenv(_ENV_FILE)
         # Don't gate on ANTHROPIC_API_KEY: the SDK also accepts
         # ANTHROPIC_AUTH_TOKEN and an OAuth profile from `ant auth login`.
         # Let it resolve credentials, and translate its error into one line.
         try:
-            self.client = Anthropic()
+            # Construction is still synchronous; only the calls are awaited.
+            self.client = AsyncAnthropic()
         except (AnthropicError, TypeError) as e:
             raise RuntimeError(
                 f"no Anthropic credentials found ({e}). "
@@ -42,7 +55,12 @@ class AnthropicProvider:
         self.max_tokens = max_tokens
 
     def stream(self, messages, system=None, tools=None, stop_sequences=None):
-        """Return the streaming context manager. Caller drives the events."""
+        """Return the async streaming context manager. Caller drives the events.
+
+        This is NOT a coroutine — do not await this call. The SDK returns an
+        AsyncMessageStreamManager, so the caller uses `async with`, iterates
+        with `async for`, and finishes with `await stream.get_final_message()`.
+        """
         params = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -61,3 +79,19 @@ class AnthropicProvider:
         if stop_sequences:
             params["stop_sequences"] = stop_sequences
         return self.client.messages.stream(**params)
+
+    @staticmethod
+    def text_from_message(message):
+        """Concatenate the text blocks of a Message.
+
+        Ported from cici_101/cli_project/core/claude.py::text_from_message.
+        """
+        return "\n".join(b.text for b in message.content if b.type == "text")
+
+    async def aclose(self):
+        """Release the HTTP pool.
+
+        The sync client gets away without this because GC closes it; the async
+        client does not, and leaks a warning on exit if never closed.
+        """
+        await self.client.close()
