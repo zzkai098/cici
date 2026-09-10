@@ -146,9 +146,15 @@ if ((getattr(st, 'st_flags', 0) & stat.UF_HIDDEN) or ...):
 chflags -R nohidden .venv
 ```
 
-关键是 **`-R` 作用在整个 `.venv`**，不能只清 `*.pth`。uv 在 macOS 上会把 `.venv` 目录本身标成 hidden，只清 `.pth` 的话下次 `uv run` 重新写文件时又是 hidden——实测只能撑一次运行。整棵树清掉之后就稳了：连跑三次 `uv run --no-sync cici`、一次带 sync 的 `uv run cici`、再加一次 `uv sync --reinstall-package cici`（会重写 `.pth`），标志都没有回来。
+关键是 **`-R` 作用在整个 `.venv`**，不能只清 `*.pth`——uv 在 macOS 上把 `.venv` 目录本身也标成 hidden，只清 `.pth` 的话很快又会回来。
 
-**如果哪天删掉 `.venv` 重建（`rm -rf .venv && uv sync`），要重新执行一次**——uv 建 venv 的时候就会打上这个标志。
+**这只是缓解，不是根治。** 清完之后 `uv run cici` 能连跑很多次都正常（`uv sync --reinstall-package cici` 重写 `.pth` 都扛得住），但标志**会以某种还没查明的方式重新出现**——观察到过一次 55/55 条目全部变回 hidden，而当时前后跑的只有 git 命令。触发条件没有复现出来，别当成已修。
+
+所以：
+
+- 症状（`ModuleNotFoundError: No module named 'cici'`）出现时，跑 `chflags -R nohidden .venv` 就能恢复
+- `rm -rf .venv && uv sync` 重建之后一定要再跑一次
+- **不受这个影响的跑法**：`PYTHONPATH=src .venv/bin/python -m cici`。做验证、写脚本、跑 eval 用这个，别用 `uv run cici`
 
 不依赖 venv 状态的验证方式仍然是 `PYTHONPATH=src .venv/bin/python -m cici`。
 
@@ -158,4 +164,4 @@ chflags -R nohidden .venv
 
 - **推 GitHub** —— 现在是本地 repo，没有 remote。`gh repo create cici --private --source=. --push`，公开前先过一遍内容。
 - **prompt_toolkit REPL** —— 现在是最小 `input()` 循环。`cici_101/cli_project/core/cli.py` 有现成的（`/命令` 补全、`@资源` mention、自定义 key bindings）。接上之后 `repl.run()` 变回 `async def`，`asyncio.Runner` 可以撤掉。
-- **要不要给 `UF_HIDDEN` 加个自动化兜底**（见 §11）—— `chflags -R nohidden .venv` 已经是稳的解法，但重建 venv 后要手动跑一次。可以塞进 README 的 setup 步骤，或者等升级 uv 看上游是否已修（现在是 0.10.7，Homebrew 2026-02-27 的构建）。
+- **`UF_HIDDEN` 到底是谁重新打上的**（见 §11）—— `chflags -R nohidden .venv` 能恢复，但复发的触发条件没查明。下一步：升级 uv（现在是 0.10.7，Homebrew 2026-02-27 的构建，已经半年）看上游是否已修；不行的话考虑在 README setup 步骤里加一条，或者干脆放弃 `uv run cici`，统一用 `PYTHONPATH=src`。
