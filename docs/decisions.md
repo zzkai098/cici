@@ -140,7 +140,17 @@ if ((getattr(st, 'st_flags', 0) & stat.UF_HIDDEN) or ...):
 
 **hidden 的 `.pth` 被静默跳过**，所以 `src` 从来没进过 `sys.path`。这跟 setuptools / flat layout / `__editable__` finder 都没关系——之前归因错了。普通包不受影响（import 机制不看 flags），只有 `.pth` 这条路径检查。
 
-临时解法 `chflags nohidden .venv/lib/python3.12/site-packages/*.pth`，但 uv 重新同步后会被重新打上。稳的验证方式是 `PYTHONPATH=src .venv/bin/python -m cici`。**这个还没有根治方案**，见下面。
+**解法**（2026-09-10 验证）：
+
+```
+chflags -R nohidden .venv
+```
+
+关键是 **`-R` 作用在整个 `.venv`**，不能只清 `*.pth`。uv 在 macOS 上会把 `.venv` 目录本身标成 hidden，只清 `.pth` 的话下次 `uv run` 重新写文件时又是 hidden——实测只能撑一次运行。整棵树清掉之后就稳了：连跑三次 `uv run --no-sync cici`、一次带 sync 的 `uv run cici`、再加一次 `uv sync --reinstall-package cici`（会重写 `.pth`），标志都没有回来。
+
+**如果哪天删掉 `.venv` 重建（`rm -rf .venv && uv sync`），要重新执行一次**——uv 建 venv 的时候就会打上这个标志。
+
+不依赖 venv 状态的验证方式仍然是 `PYTHONPATH=src .venv/bin/python -m cici`。
 
 ---
 
@@ -148,4 +158,4 @@ if ((getattr(st, 'st_flags', 0) & stat.UF_HIDDEN) or ...):
 
 - **推 GitHub** —— 现在是本地 repo，没有 remote。`gh repo create cici --private --source=. --push`，公开前先过一遍内容。
 - **prompt_toolkit REPL** —— 现在是最小 `input()` 循环。`cici_101/cli_project/core/cli.py` 有现成的（`/命令` 补全、`@资源` mention、自定义 key bindings）。接上之后 `repl.run()` 变回 `async def`，`asyncio.Runner` 可以撤掉。
-- **`UF_HIDDEN` 导致 editable 安装失效怎么根治**（见 §11）—— 现在每次 uv 重新同步后都要手动 `chflags nohidden`。候选：升级 uv 看是否已修、或加一条 sync 后的 post 步骤、或干脆在 `uv run` 之外统一用 `PYTHONPATH=src`。
+- **要不要给 `UF_HIDDEN` 加个自动化兜底**（见 §11）—— `chflags -R nohidden .venv` 已经是稳的解法，但重建 venv 后要手动跑一次。可以塞进 README 的 setup 步骤，或者等升级 uv 看上游是否已修（现在是 0.10.7，Homebrew 2026-02-27 的构建）。
