@@ -82,7 +82,7 @@ class Agent:
             tui.rule()
             print(turn.line())
 
-            self.session.add_assistant(response)
+            self.session.add_assistant(self.provider.content_from_message(response))
             if response.stop_reason != "tool_use":
                 break
             self.session.add_user(await self.registry.run_all(response))

@@ -85,7 +85,16 @@
 
 **`llm.py` 几乎没动。** `AsyncAnthropic().messages.stream()` 是**普通 `def`**，返回 `AsyncMessageStreamManager`（不是 coroutine），所以 `stream()` 的签名和 params 组装一个字都没改，只是 `Anthropic` → `AsyncAnthropic` 加一个 `aclose()`（异步 client 不像同步版能被 GC 兜底关连接池）。
 
-`AnthropicProvider` 改名 `Claude`，对齐 `cici_101/cli_project/core/claude.py`；`text_from_message` 也从那里搬过来。但 `add_user_message` / `add_assistant_message` **没有**搬——cici_101 把它们挂在 Claude 上只是因为那个 repo 没有会话对象，cici 的消息历史归 `Session` 管，这正是 roadmap 3 的前提。
+`AnthropicProvider` 改名 `Claude`，对齐 `cici_101/cli_project/core/claude.py`；`text_from_message` 也从那里搬过来。
+
+cici_101 的 `add_user_message` / `add_assistant_message` 一个方法干两件事——把 `Message` 拆成 content，再 append 进 messages 数组。这两件事在 cici 里拆开：
+
+- **拆包留在 `Claude.content_from_message`**——「`Message` 长什么样」是 provider 知识，放进 `Session` 就等于把 Anthropic 类型漏到 seam 后面。
+- **append 归 `Session`**，它只收 content，两个方法完全对称。cici_101 把两件事塞在一起，只是因为那个 repo 没有会话对象可以交。
+
+拆包用 `isinstance(message, Message)`，不用 `getattr(message, "content", message)`。鸭子类型版会拆**任何**带 `.content` 的对象——`httpx2.Response` 就有——那会把一坨 bytes 安静地塞进对话历史，而不是当场报错。（`ParsedMessage` 是 `Message` 的子类，`isinstance` 在 1.x 上照样成立。）
+
+存 blocks 原样而不是抽文本，是硬要求不是风格：开了 `display: "summarized"` 之后 content 里会带 `ThinkingBlock`，同一模型上继续对话必须原样回传，否则带 `tool_use` 的那轮下次请求会 400。
 
 **从 cli_project 明确不借的**：`ToolManager._find_client_with_tool` 每次工具调用都遍历 client 做一次 `list_tools()` 网络往返来路由工具名，字典查找严格更好；而且 `core/tools.py:100` 的 `except` 分支引用了可能未绑定的 `tool_output`（NameError）。
 
