@@ -158,6 +158,37 @@ chflags -R nohidden .venv
 
 不依赖 venv 状态的验证方式仍然是 `PYTHONPATH=src .venv/bin/python -m cici`。
 
+## 12. 四件套：职责不重叠，schema 全部手写（2026-09-10）
+
+**偏离了 CLAUDE.md 原本写的「直接搬 TextEditorTool」。** cici_101 的 `TextEditorTool` 是 view / create / str_replace / insert / undo_edit 五合一，因为在那个 notebook 里它是**唯一**的工具。cici 有四个工具，照搬会让 `view` 撞 read、`create` 撞 write——同一件事两个入口，是模型选错工具的典型原因。
+
+切成：
+
+| 工具 | 职责 |
+|---|---|
+| `read` | 看文件，带行号（行号是 `insert` 的坐标系，两边必须一致） |
+| `write` | 创建 or 整体覆盖 |
+| `edit` | 局部改：`str_replace` / `insert` / `undo_edit` |
+| `bash` | 其它一切（ls、grep、跑测试、git） |
+
+**schema 全部手写**，逐参数写 description。SDK 1.4.0 里有 Anthropic 官方定义的 `text_editor_20250728`（名字写死 `str_replace_based_edit_tool`）和 `bash_20250124`，声明两行就能用、而且模型对它们是专门训练过的、调用可靠性更高。没用，理由是接口的所有权：用官方内置的话，这套工具接口就不是自己设计的。这个取舍值得在 roadmap 4 用 eval 量一量：自写 schema vs 官方内置，工具调用成功率差多少。
+
+### 从 TextEditorTool 搬过来时修的三处
+
+1. **`_validate_path` 的前缀漏洞。** 原来是 `abs_path.startswith(self.base_dir)`——那是前缀比较不是路径比较：root 是 `/home/me/app` 时它接受 `/home/me/app-secrets`。改成 `Path.resolve()` + `is_relative_to()`，按路径段比。先 resolve 还顺带堵住软链接——指向外面的 symlink 会因为目标被拦，而不是因为名字好看被放行。（`tests/test_tools.py::test_resolve_rejects_sibling_with_shared_prefix` 钉住了这条。）
+2. **`.backups/` 不再在 `__init__` 里建。** 原来构造时就 `os.makedirs`，意味着 cici 每在一个目录里启动就往人家项目里拉一坨 `.backups/`，哪怕一个字都没改。改成第一次真备份时才建，而且挪到 `.cici/backups/`（roadmap 3 的 session 持久化也会放 `.cici/` 下，用户项目里只多一个目录）。
+3. **`_restore_backup` 现在会消费快照。** 原来永远恢复同一个最新备份，连按两次 undo 结果一样。现在恢复后删掉那个快照，所以连续 undo 会一级一级往回走。
+
+**唯一原样保留的是替换唯一性检查**——`str_replace` 匹配到 0 次或 >1 次都报错。这条最值钱：替换一个出现两次的字符串会以模型看不见的方式损坏文件。
+
+### bash 不是沙箱
+
+`asyncio.create_subprocess_shell`（不是 `exec`——bash 工具需要管道和 `&&`）+ `asyncio.timeout` + `start_new_session=True`，超时时 `killpg` 整个进程组，不会只杀掉 shell 留下孤儿。输出头尾各留一半、中间截断。
+
+**确认默认开着**，每条命令打印出来问 y/n，回车默认拒绝。拒绝是 `return` 一句话而不是 `raise`——模型应该把「用户拒了」当成一个可以绕开的正常结果，不是工具坏了。`CICI_YOLO=1` 关掉，给 eval 和批量跑用。stdin 不是 TTY 时默认拒绝并提示设 `CICI_YOLO=1`。
+
+确认用的是**阻塞 `input()`**，跟 `cli/repl.py` 同一个理由（见 §10）：这是在 `asyncio.Runner` 里跑的，Ctrl-C 会取消 agent task，而卡在 `to_thread(input)` 里的任务永远收不到那个取消。
+
 ---
 
 ## 还没做的决定
