@@ -1,7 +1,10 @@
 [project]
 name = "cici"
 version = "0.1.0"
-description = "A coding-agent CLI in Python — a minimal Claude Code, built from scratch."
+description = "A coding agent you can read in an afternoon."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=1,<2",
