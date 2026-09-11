@@ -1,39 +1,24 @@
+<p align="center">
+  <img src="docs/logo.gif" alt="cici" width="300">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/license-MIT-black" alt="MIT">
+  <img src="https://img.shields.io/badge/model-claude--opus--5-D97757" alt="Claude Opus 5">
+</p>
+
 # cici
 
-A coding agent you can read in an afternoon. ~1,650 lines of Python: a
-streaming agent loop, six tools, and per-turn telemetry — no framework.
+A lightweight coding agent in Python — the whole harness in ~1,650 lines, no framework.
 
-It reads and edits files, runs commands, and reports what each turn cost.
+It searches, reads and edits files, runs commands, and prints what every turn
+cost. Six tools, a streaming loop, and per-turn telemetry — small enough to
+read end to end in an afternoon.
 
-```
-       .-~~~~~-.
-     .'  o   o  '.
-    /       -      \
-    '.___________.'
-      ~  ~  ~  ~  ~
-
-  Hi, I'm cici, how can I help you today :D
-  claude-opus-5 · Ctrl-C to exit
-
-> where is the tool error isolation implemented?
-
-  ~ Searching for where tool failures get contained rather than raised.
-
-[tool] grep(pattern='except.*Exception.*tool', output_mode='files')
-[tool] ls(depth=2)
-──────────────────────────────────────────────────
-[turn 1] stop=tool_use tools=2 2.3s in=2489 out=143
-
-[tool] read(src/cici/tools/base.py)
-──────────────────────────────────────────────────
-[turn 2] stop=tool_use tools=1 3.1s in=4033 out=150
-
-It's in Registry.run_all (src/cici/tools/base.py:109). The try/except sits
-inside the loop, so one failing tool becomes an is_error tool_result while the
-others still run — the loop never crashes.
-──────────────────────────────────────────────────
-[turn 3] stop=end_turn tools=0 6.4s in=7937 out=553
-```
+<p align="center">
+  <img src="docs/demo.gif" alt="cici answering a question about its own source" width="880">
+</p>
 
 ## Quickstart
 
