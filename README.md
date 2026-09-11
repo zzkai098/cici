@@ -1,6 +1,12 @@
 <p align="center">
-  <img src="docs/logo.gif" alt="cici" width="300">
+  <img src="docs/logo.gif" alt="cici" width="440">
 </p>
+
+<p align="center">
+  <sub>a small, transparent coding agent — you can see right through it</sub>
+</p>
+
+<h1 align="center">cici</h1>
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
@@ -8,13 +14,10 @@
   <img src="https://img.shields.io/badge/model-claude--opus--5-D97757" alt="Claude Opus 5">
 </p>
 
-# cici
-
-A lightweight coding agent in Python — the whole harness in ~1,650 lines, no framework.
-
-It searches, reads and edits files, runs commands, and prints what every turn
-cost. Six tools, a streaming loop, and per-turn telemetry — small enough to
-read end to end in an afternoon.
+<p align="center">
+  The whole harness is ~1,650 lines of Python. No framework.<br>
+  Six tools, a streaming loop, per-turn telemetry — small enough to read end to end in an afternoon.
+</p>
 
 <p align="center">
   <img src="docs/demo.gif" alt="cici answering a question about its own source" width="880">
