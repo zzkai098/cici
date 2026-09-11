@@ -10,6 +10,7 @@ import pytest
 
 from cici.tools import default_registry
 from cici.tools.edit import EditTool
+from cici.tools.grep import GrepTool
 from cici.tools.ls import MAX_DEPTH, LsTool
 from cici.tools.read import ReadTool
 from cici.tools.workspace import Workspace
@@ -327,6 +328,117 @@ def test_ls_truncates_and_reports_the_exact_remainder(ws, monkeypatch):
     out = run(LsTool(ws).run())
     assert "showing 5 of 12" in out
     assert len(out.splitlines()) == 1 + 5 + 1  # header + 5 entries + the notice
+
+
+# --- grep ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def corpus(ws):
+    (ws.root / "src").mkdir()
+    (ws.root / "src" / "a.py").write_text("import os\ndef run():\n    pass\n")
+    (ws.root / "src" / "b.py").write_text("def run():\n    return 1\n")
+    (ws.root / "notes.md").write_text("call run() twice\n")
+    (ws.root / ".venv").mkdir()
+    (ws.root / ".venv" / "vendored.py").write_text("def run():\n")
+    return ws
+
+
+def test_grep_reports_file_and_line_number(corpus):
+    out = run(GrepTool(corpus).run(pattern=r"def run"))
+    assert "src/a.py:2: def run():" in out
+    assert "src/b.py:1: def run():" in out
+
+
+def test_grep_glob_filters_by_name(corpus):
+    out = run(GrepTool(corpus).run(pattern="run", glob="*.md"))
+    assert "notes.md" in out
+    assert "a.py" not in out
+
+
+def test_grep_glob_with_a_separator_filters_by_path(corpus):
+    out = run(GrepTool(corpus).run(pattern="run", glob="src/*.py"))
+    assert "src/a.py" in out
+    assert "notes.md" not in out
+
+
+def test_grep_skips_pruned_directories(corpus):
+    """Same PRUNED set as ls — a listing that hides .venv and a search that
+    finds things inside it would be incoherent."""
+    out = run(GrepTool(corpus).run(pattern=r"def run"))
+    assert "vendored.py" not in out
+
+
+def test_grep_files_mode_counts_per_file(corpus):
+    out = run(GrepTool(corpus).run(pattern="run", output_mode="files"))
+    assert "src/a.py (1 match)" in out
+    assert "files matched" in out
+    assert ":1:" not in out  # no line content in this mode
+
+
+def test_grep_case_insensitive_via_inline_flag(ws):
+    (ws.root / "f.py").write_text("HELLO\n")
+    assert "f.py:1" in run(GrepTool(ws).run(pattern="(?i)hello"))
+
+
+def test_grep_no_matches_suggests_what_to_change(corpus):
+    out = run(GrepTool(corpus).run(pattern="zzz_nothing"))
+    assert "no matches" in out
+    assert "Widen the path" in out
+
+
+def test_grep_invalid_regex_is_a_usable_error(ws):
+    with pytest.raises(ValueError, match="invalid regular expression"):
+        run(GrepTool(ws).run(pattern="["))
+
+
+def test_grep_bad_output_mode(ws):
+    with pytest.raises(ValueError, match="unknown output_mode"):
+        run(GrepTool(ws).run(pattern="x", output_mode="json"))
+
+
+def test_grep_searches_a_single_file_when_given_one(corpus):
+    out = run(GrepTool(corpus).run(pattern="run", path="notes.md"))
+    assert "notes.md:1" in out
+    assert "a.py" not in out
+
+
+def test_grep_skips_binary_files(ws):
+    (ws.root / "blob.bin").write_bytes(b"\x00\x01needle\xff")
+    (ws.root / "ok.py").write_text("needle\n")
+    out = run(GrepTool(ws).run(pattern="needle"))
+    assert "ok.py" in out
+    assert "blob.bin" not in out
+
+
+def test_grep_does_not_follow_symlinks_out_of_the_workspace(tmp_path):
+    root = tmp_path / "app"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("needle\n")
+    (root / "link").symlink_to(outside)
+    assert "no matches" in run(GrepTool(Workspace(root)).run(pattern="needle"))
+
+
+def test_grep_rejects_paths_outside_the_workspace(ws):
+    with pytest.raises(ValueError, match="escapes the workspace"):
+        run(GrepTool(ws).run(pattern="x", path="../.."))
+
+
+def test_grep_truncates_and_reports_the_exact_remainder(ws, monkeypatch):
+    monkeypatch.setattr("cici.tools.grep.MAX_MATCHES", 3)
+    (ws.root / "many.py").write_text("needle\n" * 10)
+    out = run(GrepTool(ws).run(pattern="needle"))
+    assert "showing 3 of 10" in out
+    assert len(out.splitlines()) == 1 + 3 + 1
+
+
+def test_grep_clips_a_very_long_matching_line(ws, monkeypatch):
+    monkeypatch.setattr("cici.tools.grep.MAX_LINE_CHARS", 20)
+    (ws.root / "min.js").write_text("needle" + "x" * 500 + "\n")
+    out = run(GrepTool(ws).run(pattern="needle"))
+    assert "line truncated" in out
 
 
 # --- bash ---------------------------------------------------------------------

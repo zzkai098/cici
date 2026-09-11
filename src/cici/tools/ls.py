@@ -3,23 +3,10 @@
 from typing import ClassVar
 
 from .base import SyncTool
-from .workspace import Workspace
+from .workspace import PRUNED, Workspace
 
 MAX_ENTRIES = 500
 MAX_DEPTH = 3
-# Never listed: the model gets nothing from 4000 files of vendored dependencies,
-# and paying for them in context is worse than not seeing them.
-PRUNED = {
-    ".git",
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".cici",
-}
 
 
 class LsTool(SyncTool):

@@ -14,6 +14,24 @@ import shutil
 import time
 from pathlib import Path
 
+# Directories no tool ever descends into. Vendored dependencies and build
+# output tell the model nothing, and walking them costs real time on a large
+# repo. Shared by ls and grep so the two agree on what the workspace "is" —
+# a listing that hides .venv and a search that finds things in it would be
+# incoherent.
+# TODO (roadmap 3): read .gitignore instead of hard-coding this.
+PRUNED = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".cici",
+}
+
 
 class Workspace:
     def __init__(self, root=None):
@@ -50,6 +68,32 @@ class Workspace:
             return str(resolved.relative_to(self.root))
         except ValueError:
             return str(resolved)
+
+    def walk_files(self, start):
+        """Yield every file under start, deepest-first within each directory.
+
+        Shared by the tools that need to traverse rather than list. Two rules
+        are enforced here rather than in each caller, because getting either
+        wrong is a security or performance bug: PRUNED directories are never
+        descended into, and symlinks are never followed — resolve() guards the
+        path the model named, but a link met mid-walk would lead straight back
+        out of the workspace.
+
+        Children are sorted at every level: iterdir() order is not stable, and
+        an unstable result reads to the model as the files having changed.
+        """
+        try:
+            children = sorted(start.iterdir(), key=lambda p: p.name)
+        except PermissionError:
+            return
+        for child in children:
+            if child.is_symlink():
+                continue
+            if child.is_dir():
+                if child.name not in PRUNED:
+                    yield from self.walk_files(child)
+            elif child.is_file():
+                yield child
 
     def backup(self, resolved):
         """Snapshot a file before it is modified. Returns None if it is new.
