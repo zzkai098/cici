@@ -149,9 +149,19 @@ error rather than a best guess.
 Working: the agent loop, streaming with summarized reasoning, all six tools,
 per-turn telemetry, 59 tests that never touch the API.
 
-Not built yet: prompt caching, session persistence and context management,
-trajectory-level evaluation, MCP, sub-agents. Tracked in
-[`CLAUDE.md`](CLAUDE.md).
+Not built yet, roughly in the order they are worth doing:
+
+1. **prompt caching** — a cache breakpoint on the system prompt and the tool
+   array, with the hit rate in the telemetry line. Six tool schemas now go out
+   on every turn; one debugging session measured 41k input tokens by turn 20
+2. **session persistence and context management** — what to keep, summarise,
+   drop; `@file` mentions
+3. **trajectory evaluation** — score a run on whether the task completed, how
+   many turns it took, and what it cost. The interesting first experiment is
+   hand-written schemas against the Anthropic-defined tool definitions
+4. **parallel tool execution** — the model already issues two read-only calls
+   per turn routinely; `run_all` still runs them in sequence
+5. MCP, sub-agents
 
 `bash` is **not a sandbox**. It runs commands as you, with your permissions, and
 unlike the file tools it is not confined to the workspace — the confirmation

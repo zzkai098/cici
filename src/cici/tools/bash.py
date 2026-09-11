@@ -5,10 +5,10 @@ asyncio.timeout around an asyncio subprocess can actually kill a hung command,
 which subprocess.run(timeout=) cannot — it blocks the whole process for the
 duration and leaves the child's process group behind.
 
-Not a sandbox. Confirmation is the only thing standing between the model and
-the machine, so it is on by default; CICI_YOLO=1 turns it off for evals and
-batch runs. Anything claiming this is sandboxed would be a lie — see the
-honesty section in CLAUDE.md.
+Not a sandbox, and unlike the file tools it is not confined to the workspace.
+Confirmation is the only thing standing between the model and the machine, so
+it is on by default; CICI_YOLO=1 turns it off for evals and batch runs.
+Anything claiming this is sandboxed would be a lie.
 """
 
 import asyncio

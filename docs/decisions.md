@@ -160,7 +160,7 @@ chflags -R nohidden .venv
 
 ## 12. 四件套：职责不重叠，schema 全部手写（2026-09-10）
 
-**偏离了 CLAUDE.md 原本写的「直接搬 TextEditorTool」。** cici_101 的 `TextEditorTool` 是 view / create / str_replace / insert / undo_edit 五合一，因为在那个 notebook 里它是**唯一**的工具。cici 有四个工具，照搬会让 `view` 撞 read、`create` 撞 write——同一件事两个入口，是模型选错工具的典型原因。
+**偏离了原计划的「直接搬 TextEditorTool」。** cici_101 的 `TextEditorTool` 是 view / create / str_replace / insert / undo_edit 五合一，因为在那个 notebook 里它是**唯一**的工具。cici 有四个工具，照搬会让 `view` 撞 read、`create` 撞 write——同一件事两个入口，是模型选错工具的典型原因。
 
 切成：
 

@@ -1,5 +1,8 @@
 .env
 .env.local
+
+# Working notes for whoever is driving this repo — kept local.
+CLAUDE.md
 .venv/
 venv/
 __pycache__/
