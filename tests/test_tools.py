@@ -10,6 +10,7 @@ import pytest
 
 from cici.tools import default_registry
 from cici.tools.edit import EditTool
+from cici.tools.ls import MAX_DEPTH, LsTool
 from cici.tools.read import ReadTool
 from cici.tools.workspace import Workspace
 from cici.tools.write import WriteTool
@@ -220,6 +221,112 @@ def test_backups_are_not_created_until_a_file_is_edited(ws):
     ReadTool(ws)
     EditTool(ws)
     assert not ws.backup_dir.exists(), "cici_101 made .backups/ on construction"
+
+
+# --- ls -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def tree(ws):
+    """A small project shape: two source levels, one noise dir, one plain file."""
+    (ws.root / "src" / "pkg").mkdir(parents=True)
+    (ws.root / "src" / "top.py").write_text("")
+    (ws.root / "src" / "pkg" / "deep.py").write_text("")
+    (ws.root / "README.md").write_text("")
+    (ws.root / ".venv" / "lib").mkdir(parents=True)
+    (ws.root / ".venv" / "lib" / "junk.py").write_text("")
+    return ws
+
+
+def test_ls_defaults_to_the_workspace_root(tree):
+    out = run(LsTool(tree).run())
+    assert "README.md" in out
+    assert "src/" in out
+
+
+def test_ls_marks_directories_with_a_slash(tree):
+    out = run(LsTool(tree).run(path="src"))
+    assert "pkg/" in out
+    assert "top.py" in out and "top.py/" not in out
+
+
+def test_ls_depth_1_does_not_descend(tree):
+    out = run(LsTool(tree).run(path="src"))
+    assert "pkg/" in out
+    assert "deep.py" not in out
+
+
+def test_ls_depth_2_descends_one_level(tree):
+    out = run(LsTool(tree).run(path="src", depth=2))
+    assert "pkg/deep.py" in out
+
+
+def test_ls_prunes_noise_directories(tree):
+    """.venv is skipped entirely — not listed, and never walked into."""
+    out = run(LsTool(tree).run(depth=MAX_DEPTH))
+    assert ".venv" not in out
+    assert "junk.py" not in out
+
+
+def test_ls_shows_dotfiles_that_are_not_pruned(ws):
+    (ws.root / ".gitignore").write_text("")
+    assert ".gitignore" in run(LsTool(ws).run())
+
+
+def test_ls_clamps_depth_above_the_ceiling(ws):
+    """The model's depth is a request; MAX_DEPTH is the ceiling."""
+    deep = ws.root
+    for i in range(6):
+        deep = deep / f"d{i}"
+    deep.mkdir(parents=True)
+    out = run(LsTool(ws).run(depth=99))
+    assert f"depth {MAX_DEPTH}" in out
+    assert "d0/d1/d2/" in out
+    assert "d0/d1/d2/d3" not in out
+
+
+def test_ls_does_not_follow_symlinks_out_of_the_workspace(tmp_path):
+    """Following a link would walk straight back out of the confined root."""
+    root = tmp_path / "app"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("shh")
+    (root / "link").symlink_to(outside)
+
+    out = run(LsTool(Workspace(root)).run(depth=MAX_DEPTH))
+    assert "link@" in out
+    assert "secret.txt" not in out
+
+
+def test_ls_on_a_file_points_at_read(ws):
+    (ws.root / "f.py").write_text("")
+    with pytest.raises(NotADirectoryError, match="use read"):
+        run(LsTool(ws).run(path="f.py"))
+
+
+def test_ls_missing_directory(ws):
+    with pytest.raises(FileNotFoundError):
+        run(LsTool(ws).run(path="nope"))
+
+
+def test_ls_rejects_paths_outside_the_workspace(ws):
+    with pytest.raises(ValueError, match="escapes the workspace"):
+        run(LsTool(ws).run(path=".."))
+
+
+def test_ls_empty_directory(ws):
+    (ws.root / "hollow").mkdir()
+    assert "is empty" in run(LsTool(ws).run(path="hollow"))
+
+
+def test_ls_truncates_and_reports_the_exact_remainder(ws, monkeypatch):
+    monkeypatch.setattr("cici.tools.ls.MAX_ENTRIES", 5)
+    for i in range(12):
+        (ws.root / f"f{i:02}.py").write_text("")
+    out = run(LsTool(ws).run())
+    assert "showing 5 of 12" in out
+    assert len(out.splitlines()) == 1 + 5 + 1  # header + 5 entries + the notice
 
 
 # --- bash ---------------------------------------------------------------------
