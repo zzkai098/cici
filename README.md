@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <sub>a small, transparent coding agent — you can see right through it</sub>
+  <em>a small, transparent coding agent — you can see right through it</em>
 </p>
 
 <h1 align="center">cici</h1>
