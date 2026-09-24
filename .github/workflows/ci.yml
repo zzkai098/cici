@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # .python-version pins the interpreter; uv.lock pins everything else.
+      - name: Install the project
+        run: uv sync --locked
+
+      - name: Lint
+        run: |
+          uv run ruff check src evals tests
+          uv run ruff format --check src evals tests
+
+      # No API key, on purpose: the suite exercises the tools against a real
+      # temporary filesystem and never reaches the network. If a test ever
+      # starts needing a key, that is the signal it stopped being a unit test.
+      - name: Test
+        run: uv run pytest -q
