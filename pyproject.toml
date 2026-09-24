@@ -8,6 +8,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=1,<2",
+    # anthropic 1.x already pins this; llm.py::OpenAICompatible uses it
+    # directly, so declare it rather than lean on a transitive dep.
+    "httpx2>=2,<3",
     "python-dotenv>=1.0",
     "prompt_toolkit>=3.0",
 ]
