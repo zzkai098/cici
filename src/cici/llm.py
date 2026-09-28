@@ -386,6 +386,55 @@ def _usage_from(raw):
 OPENAI_DEFAULT_MAX_TOKENS = 4000
 MAX_TOKENS_ENV = "CICI_MAX_TOKENS"
 
+# Set to force non-streaming from the first request, skipping the probe below.
+# Worth setting once a run has established that a given server does not stream:
+# the probe costs one admitted request per provider, every time.
+NO_STREAM_ENV = "CICI_NO_STREAM"
+
+# Statuses that mean "this server will not stream THIS request", as opposed to
+# "this request is wrong" or "the server is broken". A refusal of the streaming
+# form specifically is the only case where re-sending without `stream` is a
+# sane thing to do -- on a 401 or a 500 the same request would fail the same
+# way and the retry would just spend another of the 25.
+_NO_STREAM_SIGNALS = frozenset({400, 404, 405, 406, 415, 422, 501})
+
+# Sent on every request. Rule 4 of the Agenthon model-API rules asks for a
+# pinned temperature and seed where the API supports them, and T1 verification
+# compares the organizer's rerun against the submitted result per unit. A
+# server that does not know `seed` ignores it; one that rejects it outright
+# would do so on the first call, which is why this is a module constant rather
+# than something discovered at run time.
+OPENAI_TEMPERATURE = 0.0
+SEED_ENV = "QFBENCH_SEED"
+DEFAULT_SEED = 0
+
+
+def _env_flag(name):
+    """True for a set, non-empty, non-falsey environment variable.
+
+    "0" and "false" read as off rather than on, because a variable someone set
+    to 0 to mean "no" turning a feature ON is the kind of surprise that costs
+    a whole run to notice.
+    """
+    raw = (os.getenv(name) or "").strip().lower()
+    return bool(raw) and raw not in {"0", "false", "no", "off"}
+
+
+def _resolve_seed():
+    """The harness's QFBENCH_SEED when it set one, else a fixed default.
+
+    Determinism is the point, so the fallback is a constant and not, say, a
+    hash of the clock. A non-integer value is ignored rather than fatal: a
+    malformed seed should not take down a run that would otherwise score.
+    """
+    raw = (os.getenv(SEED_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_SEED
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_SEED
+
 
 def _resolve_max_tokens(explicit=None):
     """Explicit argument wins, then CICI_MAX_TOKENS, then the conservative default.
@@ -463,18 +512,22 @@ class OpenAICompatible:
         # Counted at the request layer, not the turn layer: a unit is allowed
         # 25 admitted requests and retries count, so turns are the wrong unit.
         #
-        # ⚠️ The increment lives in stream(), one frame above the POST in
-        # _ChatStreamManager.__aenter__. That is correct today precisely
-        # because there is no retry anywhere below it: one stream() call is one
-        # HTTP request, and a 4xx is counted because the increment happens
-        # first. Add a retry loop inside __aenter__ and this silently
-        # under-counts every retry — each of which the grader admits against
-        # the same budget of 25. If retries are ever added, the counter must
-        # move down to wrap the actual send, not stay here.
-        #
-        # TODO (step 3): act on this — inject a "N calls left, write the final
-        # deliverable now" note as the budget runs down.
+        # The earlier note here said the increment could live in stream() only
+        # while nothing below it retried, and that adding a retry would
+        # silently under-count. The non-streaming fallback IS that retry, so
+        # the increment moved into charge() and the fallback calls it again
+        # before its own POST. One charge() call is one admitted request, which
+        # is the unit the grader bills in.
         self.request_count = 0
+
+        # Whether to ask for a stream at all. Flipped off for the rest of this
+        # provider's life by the first server refusal of the streaming form --
+        # sticky because the probe costs a request and the answer cannot
+        # change between two calls to the same endpoint.
+        self.streaming = not _env_flag(NO_STREAM_ENV)
+        # Populated when the fallback fires, so a caller can report WHY the
+        # rest of the run is non-streaming rather than leaving it invisible.
+        self.stream_refusal = None
 
     def stream(self, messages, system=None, tools=None, stop_sequences=None):
         """Return an async context manager over the chat-completions stream.
@@ -490,18 +543,35 @@ class OpenAICompatible:
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": to_openai_messages(messages, system=system),
-            "stream": True,
-            # Usage is omitted from a stream unless asked for. Servers that do
-            # not know this option ignore it; the shim tolerates no usage at all.
-            "stream_options": {"include_usage": True},
+            # Pinned rather than left to the server's default: see
+            # OPENAI_TEMPERATURE. `n` is deliberately absent -- the House route
+            # refuses multiple generated alternatives, and sending n=1
+            # explicitly only adds a field for it to disagree about.
+            "temperature": OPENAI_TEMPERATURE,
+            "seed": _resolve_seed(),
         }
+        payload.update(_stream_fields(self.streaming))
         if tools:
             payload["tools"] = to_openai_tools(tools)
         if stop_sequences:
             payload["stop"] = stop_sequences
 
+        self.charge()
+        return _ChatStreamManager(self, payload)
+
+    def charge(self):
+        """Record one admitted request. Call it once per HTTP send, no more.
+
+        The budget the grader enforces counts admitted requests, including the
+        ones that come back 4xx and including a retry with identical content.
+        So this is called before a send rather than after a success.
+        """
         self.request_count += 1
-        return _ChatStreamManager(self.client, payload)
+
+    def disable_streaming(self, reason):
+        """Remember that this endpoint refused the streaming form."""
+        self.streaming = False
+        self.stream_refusal = reason
 
     content_from_message = staticmethod(_content_from_shim)
     text_from_message = staticmethod(_text_from_shim)
@@ -510,27 +580,78 @@ class OpenAICompatible:
         await self.client.aclose()
 
 
-class _ChatStreamManager:
-    """Mirror of anthropic's AsyncMessageStreamManager."""
+def _stream_fields(streaming):
+    """The two payload keys that differ between the streamed and whole forms."""
+    if not streaming:
+        return {"stream": False}
+    return {
+        "stream": True,
+        # Usage is omitted from a stream unless asked for. Servers that do
+        # not know this option ignore it; the shim tolerates no usage at all.
+        "stream_options": {"include_usage": True},
+    }
 
-    def __init__(self, client, payload):
-        self._client = client
+
+class _ChatStreamManager:
+    """Mirror of anthropic's AsyncMessageStreamManager, plus a fallback.
+
+    Streaming is an optimisation, not a requirement: the loop needs a final
+    message, and the events in between only drive the live rendering. A server
+    that will not stream can still answer the same question in one body. So a
+    refusal of the streaming FORM is retried whole rather than surfaced as a
+    failed turn -- which, under a 25-request budget and one graded attempt per
+    task, is the difference between a unit that scores and one that does not.
+
+    The retry is charged. It is a second admitted request and the grader bills
+    it as one, so pretending otherwise would put the run over the ceiling while
+    the counter still read under it.
+    """
+
+    def __init__(self, provider, payload):
+        self._provider = provider
+        self._client = provider.client
         self._payload = payload
         self._cm = None
 
     async def __aenter__(self):
+        if not self._payload.get("stream"):
+            # Already known not to stream -- no probe, no second charge.
+            return await self._whole(charge=False)
+
         self._cm = self._client.stream("POST", "/chat/completions", json=self._payload)
         response = await self._cm.__aenter__()
         if response.status_code >= 400:
             # The body has not been read yet on a streaming response, and it is
             # where the useful half of the error lives.
             body = (await response.aread()).decode("utf-8", "replace")[:500]
+            status = response.status_code
             await self._cm.__aexit__(None, None, None)
             self._cm = None
-            raise RuntimeError(
-                f"model endpoint returned {response.status_code}: {body.strip()}"
-            )
+            if status in _NO_STREAM_SIGNALS:
+                self._provider.disable_streaming(f"{status}: {body.strip()[:200]}")
+                self._payload.pop("stream_options", None)
+                self._payload["stream"] = False
+                return await self._whole(charge=True)
+            raise RuntimeError(f"model endpoint returned {status}: {body.strip()}")
         return _ChatStream(response)
+
+    async def _whole(self, charge):
+        """Send the same request without `stream` and wrap the finished body."""
+        if charge:
+            self._provider.charge()
+        response = await self._client.post("/chat/completions", json=self._payload)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                "model endpoint returned "
+                f"{response.status_code} (non-streaming): {response.text[:500].strip()}"
+            )
+        try:
+            body = response.json()
+        except ValueError as e:
+            raise RuntimeError(
+                f"model endpoint returned unparseable JSON: {response.text[:200]!r}"
+            ) from e
+        return _ChatCompletion(body)
 
     async def __aexit__(self, *exc_info):
         if self._cm is None:
@@ -697,6 +818,100 @@ class _ChatStream:
             stop_reason = "tool_use"
         return ShimMessage(
             content, stop_reason, usage=_usage_from(self._usage), model=self._model
+        )
+
+
+class _ChatCompletion:
+    """A finished (non-streamed) response, wearing the stream seam.
+
+    Same two things the loop does to a stream -- `async for` over events, then
+    `await get_final_message()` -- so agent.py and the renderer above it cannot
+    tell which form answered. The events are synthesised from a body that was
+    already whole when it arrived; there was no stream, and this does not
+    pretend there was one by chunking the text. The text block is emitted once,
+    entire, which is what actually happened.
+
+    Kept separate from _ChatStream rather than folded into it: that class is a
+    state machine over fragments arriving out of order, and none of that state
+    has any meaning here. Sharing it would mean maintaining a version of the
+    fragment reassembler that never reassembles anything.
+    """
+
+    def __init__(self, body):
+        self._body = body if isinstance(body, dict) else {}
+        self._message = self._extract_message()
+
+    def _extract_message(self):
+        choices = self._body.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return {}
+        return choices[0].get("message") or {}
+
+    def _finish_reason(self):
+        choices = self._body.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return None
+        return choices[0].get("finish_reason")
+
+    def _text(self):
+        text = self._message.get("content")
+        if isinstance(text, list):
+            # Same multimodal part-list shape _ChatStream tolerates.
+            return "".join(p.get("text", "") for p in text if isinstance(p, dict))
+        return text or ""
+
+    def _tool_blocks(self):
+        blocks = []
+        for position, call in enumerate(self._message.get("tool_calls") or []):
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            blocks.append(
+                ToolUseBlock(
+                    call.get("id") or f"call_{position}",
+                    function.get("name") or "",
+                    _parse_args(function.get("arguments") or ""),
+                )
+            )
+        return blocks
+
+    def __aiter__(self):
+        return self._events()
+
+    async def _events(self):
+        reasoning = self._message.get("reasoning_content") or self._message.get(
+            "reasoning"
+        )
+        if reasoning:
+            yield StreamEvent("thinking", thinking=reasoning)
+        text = self._text()
+        if text:
+            yield StreamEvent("text", text=text)
+        for block in self._tool_blocks():
+            # start then stop, back to back: the renderer opens on start and
+            # closes on stop, and there is nothing in between to show.
+            yield StreamEvent("content_block_start", content_block=block)
+            yield StreamEvent("content_block_stop", content_block=block)
+
+    async def get_final_message(self):
+        content = []
+        text = self._text()
+        if text:
+            content.append(TextBlock(text))
+        tools = self._tool_blocks()
+        content.extend(tools)
+
+        stop_reason = _FINISH_REASONS.get(self._finish_reason(), "end_turn")
+        if tools:
+            # Same load-bearing override as _ChatStream._build: agent.py only
+            # runs tools when stop_reason is "tool_use", and a server reporting
+            # "stop" beside a populated tool_calls array has been seen.
+            stop_reason = "tool_use"
+        return ShimMessage(
+            content,
+            stop_reason,
+            usage=_usage_from(self._body.get("usage")),
+            model=self._body.get("model"),
         )
 
 

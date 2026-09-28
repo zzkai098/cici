@@ -17,6 +17,7 @@ from cici.llm import (
     StubLLM,
     TextBlock,
     ToolUseBlock,
+    _ChatCompletion,
     _ChatStream,
     to_openai_messages,
     to_openai_tools,
@@ -498,3 +499,267 @@ def test_stub_ends_the_conversation_when_the_script_runs_out(tmp_path):
     agent = Agent(provider, default_registry(Workspace(tmp_path)), Session())
     assert run(agent.run("hi")) == "stub: script exhausted"
     assert provider.request_count == 1
+
+
+# --- the non-streaming fallback -----------------------------------------------
+#
+# A server that refuses the streaming FORM can still answer the same question
+# in one body. Under 25 admitted requests and one graded attempt per task, the
+# difference between retrying whole and surfacing a failed turn is the
+# difference between a unit that scores and one that does not.
+
+
+class FakeHTTPResponse:
+    """The two shapes httpx2 hands back, as much of them as the manager reads."""
+
+    def __init__(self, status_code, payload=None, raw=b""):
+        self.status_code = status_code
+        self._payload = payload
+        self._raw = raw
+
+    async def aread(self):
+        return self._raw
+
+    async def aiter_lines(self):
+        # A 200 that streams nothing: enough for _ChatStream to build an empty
+        # message, which is all the payload-shape tests need.
+        for line in ("data: [DONE]",):
+            yield line
+
+    @property
+    def text(self):
+        return self._raw.decode()
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class FakeStreamCM:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class FakeClient:
+    """Records what was sent, so the payload itself can be asserted on."""
+
+    def __init__(self, stream_response, post_response=None):
+        self._stream_response = stream_response
+        self._post_response = post_response
+        self.stream_payloads = []
+        self.post_payloads = []
+
+    def stream(self, method, url, json=None):
+        self.stream_payloads.append(json)
+        return FakeStreamCM(self._stream_response)
+
+    async def post(self, url, json=None):
+        self.post_payloads.append(json)
+        return self._post_response
+
+    async def aclose(self):
+        pass
+
+
+def make_provider(monkeypatch, **env):
+    monkeypatch.setenv("MODEL_ENDPOINT", "http://model:8443")
+    monkeypatch.setenv("MODEL_NAME", "some-model")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return OpenAICompatible()
+
+
+COMPLETION = {
+    "model": "some-model",
+    "choices": [{"message": {"content": "whole answer"}, "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+}
+
+
+def enter(manager):
+    return run(manager.__aenter__())
+
+
+def test_a_refused_stream_is_retried_whole(monkeypatch):
+    provider = make_provider(monkeypatch)
+    provider.client = FakeClient(
+        FakeHTTPResponse(400, raw=b'{"error":"stream unsupported"}'),
+        FakeHTTPResponse(200, payload=COMPLETION),
+    )
+    stream = enter(provider.stream([{"role": "user", "content": "hi"}]))
+    message = run(stream.get_final_message())
+    assert message.content[0].text == "whole answer"
+    assert provider.streaming is False
+    assert "stream unsupported" in provider.stream_refusal
+
+
+def test_the_retry_is_charged_because_the_grader_charges_it(monkeypatch):
+    """Two HTTP sends are two admitted requests out of the unit's 25."""
+    provider = make_provider(monkeypatch)
+    provider.client = FakeClient(
+        FakeHTTPResponse(400, raw=b"no"), FakeHTTPResponse(200, payload=COMPLETION)
+    )
+    enter(provider.stream([{"role": "user", "content": "hi"}]))
+    assert provider.request_count == 2
+
+
+def test_the_refusal_is_sticky_so_the_probe_is_paid_for_once(monkeypatch):
+    provider = make_provider(monkeypatch)
+    provider.client = FakeClient(
+        FakeHTTPResponse(400, raw=b"no"), FakeHTTPResponse(200, payload=COMPLETION)
+    )
+    enter(provider.stream([{"role": "user", "content": "one"}]))
+    enter(provider.stream([{"role": "user", "content": "two"}]))
+    # One streaming probe, then two whole sends: three charges, not four.
+    assert provider.request_count == 3
+    assert len(provider.client.stream_payloads) == 1
+    assert provider.client.post_payloads[-1]["stream"] is False
+    assert "stream_options" not in provider.client.post_payloads[-1]
+
+
+def test_an_auth_failure_is_not_retried(monkeypatch):
+    """401 would fail identically without `stream`; retrying spends a request
+    to learn nothing."""
+    provider = make_provider(monkeypatch)
+    provider.client = FakeClient(
+        FakeHTTPResponse(401, raw=b"unauthorized"),
+        FakeHTTPResponse(200, payload=COMPLETION),
+    )
+    with pytest.raises(RuntimeError, match="401"):
+        enter(provider.stream([{"role": "user", "content": "hi"}]))
+    assert provider.request_count == 1
+    assert provider.client.post_payloads == []
+    assert provider.streaming is True
+
+
+def test_no_stream_env_skips_the_probe_entirely(monkeypatch):
+    provider = make_provider(monkeypatch, CICI_NO_STREAM="1")
+    provider.client = FakeClient(None, FakeHTTPResponse(200, payload=COMPLETION))
+    enter(provider.stream([{"role": "user", "content": "hi"}]))
+    assert provider.request_count == 1
+    assert provider.client.stream_payloads == []
+
+
+def test_a_falsey_no_stream_value_does_not_turn_it_on(monkeypatch):
+    provider = make_provider(monkeypatch, CICI_NO_STREAM="0")
+    assert provider.streaming is True
+    run(provider.aclose())
+
+
+def test_temperature_and_seed_are_pinned_on_every_request(monkeypatch):
+    """Rule 4: T1 verification compares the organizer's rerun per unit."""
+    provider = make_provider(monkeypatch, QFBENCH_SEED="4242")
+    provider.client = FakeClient(FakeHTTPResponse(200))
+    enter(provider.stream([{"role": "user", "content": "hi"}]))
+    sent = provider.client.stream_payloads or provider.client.post_payloads
+    assert sent[0]["temperature"] == 0.0
+    assert sent[0]["seed"] == 4242
+    # n is deliberately absent: the House route refuses multiple alternatives.
+    assert "n" not in sent[0]
+
+
+def test_a_malformed_seed_falls_back_rather_than_killing_the_run(monkeypatch):
+    provider = make_provider(monkeypatch, QFBENCH_SEED="not-a-number")
+    provider.client = FakeClient(FakeHTTPResponse(200))
+    enter(provider.stream([{"role": "user", "content": "hi"}]))
+    assert provider.client.stream_payloads[0]["seed"] == 0
+
+
+# --- the whole-body shim ------------------------------------------------------
+
+
+def completion(message, finish_reason="stop", usage=None, model="some-model"):
+    body = {
+        "model": model,
+        "choices": [{"message": message, "finish_reason": finish_reason}],
+    }
+    if usage:
+        body["usage"] = usage
+    return _ChatCompletion(body)
+
+
+def test_a_whole_body_emits_its_text_once(monkeypatch):
+    events, message = drain(completion({"content": "hello"}))
+    assert [e.text for e in events if e.type == "text"] == ["hello"]
+    assert message.content[0].text == "hello"
+    assert message.stop_reason == "end_turn"
+
+
+def test_whole_body_tool_calls_force_tool_use(monkeypatch):
+    events, message = drain(
+        completion(
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_abc",
+                        "function": {"name": "write", "arguments": '{"path":"a.py"}'},
+                    }
+                ],
+            },
+            finish_reason="stop",
+        )
+    )
+    # Same override the streaming shim applies: trust the content, not the
+    # server's finish_reason.
+    assert message.stop_reason == "tool_use"
+    block = message.content[0]
+    assert (block.name, block.input) == ("write", {"path": "a.py"})
+    assert [e.type for e in events] == ["content_block_start", "content_block_stop"]
+
+
+def test_a_tool_call_without_an_id_still_gets_one(monkeypatch):
+    """The loop pairs tool_result back by id, so a missing one is not optional."""
+    _, message = drain(
+        completion({"tool_calls": [{"function": {"name": "ls", "arguments": "{}"}}]})
+    )
+    assert message.content[0].id == "call_0"
+
+
+def test_whole_body_malformed_arguments_are_handed_through(monkeypatch):
+    _, message = drain(
+        completion(
+            {"tool_calls": [{"id": "x", "function": {"name": "ls", "arguments": "{["}}]}
+        )
+    )
+    assert message.content[0].input == "{["
+
+
+def test_whole_body_reasoning_surfaces_as_thinking(monkeypatch):
+    events, _ = drain(completion({"content": "a", "reasoning_content": "thought"}))
+    assert [e.thinking for e in events if e.type == "thinking"] == ["thought"]
+
+
+def test_whole_body_usage_excludes_cached_tokens(monkeypatch):
+    _, message = drain(
+        completion(
+            {"content": "a"},
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 7,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+        )
+    )
+    assert message.usage.input_tokens == 60
+    assert message.usage.cache_read_input_tokens == 40
+    assert message.usage.output_tokens == 7
+
+
+def test_a_multimodal_part_list_is_flattened(monkeypatch):
+    _, message = drain(completion({"content": [{"text": "a"}, {"text": "b"}]}))
+    assert message.content[0].text == "ab"
+
+
+def test_an_empty_body_is_a_message_not_a_crash(monkeypatch):
+    events, message = drain(_ChatCompletion({}))
+    assert events == []
+    assert message.content == []
+    assert message.stop_reason == "end_turn"
