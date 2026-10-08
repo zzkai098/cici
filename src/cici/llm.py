@@ -300,7 +300,24 @@ def to_openai_messages(messages, system=None):
                 for b in blocks
                 if _block_field(b, "type") == "tool_use"
             ]
-            entry = {"role": "assistant", "content": text or None}
+            # `content: null` is legal ONLY next to tool_calls -- that is the
+            # shape the OpenAI schema requires for a tool-calling turn. On a
+            # turn with neither text nor tool calls it is an invalid assistant
+            # message, and a strict server answers 400 to the NEXT request,
+            # which costs one of the unit's 25 admitted requests.
+            #
+            # That turn is reachable, not hypothetical: the House Development
+            # model runs with thinking ENABLED BY DEFAULT
+            # (Agenthon2026-public docs/HOUSE-MODEL.md, "Development thinking
+            # controls"), so a reasoning trace can consume the whole
+            # max_tokens budget and come back as content: null with
+            # finish_reason: "length" and no tool call. _ChatCompletion._text()
+            # turns that into "", the final message carries no blocks, and this
+            # function used to serialise the empty turn straight back as null.
+            entry = {
+                "role": "assistant",
+                "content": text or ("" if not tool_calls else None),
+            }
             if tool_calls:
                 entry["tool_calls"] = tool_calls
             out.append(entry)
@@ -390,6 +407,11 @@ MAX_TOKENS_ENV = "CICI_MAX_TOKENS"
 # Worth setting once a run has established that a given server does not stream:
 # the probe costs one admitted request per provider, every time.
 NO_STREAM_ENV = "CICI_NO_STREAM"
+
+# Set to ask an OpenAI-compatible server to disable its reasoning mode. See
+# _thinking_fields() for why a reasoning model on a small output budget is a
+# problem for a tool-calling agent.
+NO_THINKING_ENV = "CICI_NO_THINKING"
 
 # Statuses that mean "this server will not stream THIS request", as opposed to
 # "this request is wrong" or "the server is broken". A refusal of the streaming
@@ -502,7 +524,15 @@ class OpenAICompatible:
             raise RuntimeError("no model name found. Set MODEL_NAME or pass model=.")
         self.max_tokens = _resolve_max_tokens(max_tokens)
 
-        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        # Accept is NOT set here. It was, as "text/event-stream" on the client,
+        # which meant every non-streaming request advertised that it wanted an
+        # event stream and would accept nothing else. A server that honours
+        # Accept answers 406, and the 406 fallback only exists on the streaming
+        # branch -- the non-streaming one raises RuntimeError and loses the
+        # unit. With CICI_NO_STREAM=1 in the submission image, every request is
+        # the non-streaming one, so this was on the critical path for all 86.
+        # Set per request instead, in _stream_fields' companion below.
+        headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         self.client = httpx2.AsyncClient(
@@ -550,6 +580,7 @@ class OpenAICompatible:
             "temperature": OPENAI_TEMPERATURE,
             "seed": _resolve_seed(),
         }
+        payload.update(_thinking_fields())
         payload.update(_stream_fields(self.streaming))
         if tools:
             payload["tools"] = to_openai_tools(tools)
@@ -578,6 +609,36 @@ class OpenAICompatible:
 
     async def aclose(self):
         await self.client.aclose()
+
+
+def _thinking_fields():
+    """`chat_template_kwargs` to turn the server's reasoning mode off, if asked.
+
+    Not an Anthropic-style `thinking` parameter -- this is the option the House
+    route documents (Agenthon2026-public docs/HOUSE-MODEL.md, "Development
+    thinking controls"), passed through to the model's chat template:
+
+        {"chat_template_kwargs": {"enable_thinking": false}}
+
+    Why this exists at all: that model has **thinking enabled by default**, and
+    reasoning tokens are generated into the same output budget as the answer.
+    With a small max_tokens, a request can spend the entire allowance on a
+    reasoning trace and return content: null with finish_reason "length" and no
+    tool call -- a turn that cost a request and moved nothing forward. An agent
+    needs tool calls, not prose it never shows anyone.
+
+    Off by default here, because this is a general provider and a server that
+    does not know the option should not receive it. The competition image opts
+    in. A server that ignores unknown fields is unaffected either way.
+    """
+    if not _env_flag(NO_THINKING_ENV):
+        return {}
+    return {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _accept_for(streaming):
+    """The Accept header appropriate to the form of this one request."""
+    return {"Accept": "text/event-stream" if streaming else "application/json"}
 
 
 def _stream_fields(streaming):
@@ -618,7 +679,12 @@ class _ChatStreamManager:
             # Already known not to stream -- no probe, no second charge.
             return await self._whole(charge=False)
 
-        self._cm = self._client.stream("POST", "/chat/completions", json=self._payload)
+        self._cm = self._client.stream(
+            "POST",
+            "/chat/completions",
+            json=self._payload,
+            headers=_accept_for(True),
+        )
         response = await self._cm.__aenter__()
         if response.status_code >= 400:
             # The body has not been read yet on a streaming response, and it is
@@ -639,7 +705,9 @@ class _ChatStreamManager:
         """Send the same request without `stream` and wrap the finished body."""
         if charge:
             self._provider.charge()
-        response = await self._client.post("/chat/completions", json=self._payload)
+        response = await self._client.post(
+            "/chat/completions", json=self._payload, headers=_accept_for(False)
+        )
         if response.status_code >= 400:
             raise RuntimeError(
                 "model endpoint returned "

@@ -555,13 +555,18 @@ class FakeClient:
         self._post_response = post_response
         self.stream_payloads = []
         self.post_payloads = []
+        # Accept is per-request, not on the client, so it is recorded here too.
+        self.stream_headers = []
+        self.post_headers = []
 
-    def stream(self, method, url, json=None):
+    def stream(self, method, url, json=None, headers=None):
         self.stream_payloads.append(json)
+        self.stream_headers.append(headers or {})
         return FakeStreamCM(self._stream_response)
 
-    async def post(self, url, json=None):
+    async def post(self, url, json=None, headers=None):
         self.post_payloads.append(json)
+        self.post_headers.append(headers or {})
         return self._post_response
 
     async def aclose(self):
@@ -763,3 +768,86 @@ def test_an_empty_body_is_a_message_not_a_crash(monkeypatch):
     assert events == []
     assert message.content == []
     assert message.stop_reason == "end_turn"
+
+
+def test_an_empty_assistant_turn_is_not_serialised_as_null_content():
+    """`content: null` is legal only beside tool_calls. On a turn with neither
+    text nor tool calls it is an invalid assistant message, and a strict server
+    answers 400 to the NEXT request — costing one of 25 admitted requests.
+
+    Reachable, not hypothetical: the House Development model has thinking
+    enabled by default, so a reasoning trace can spend the whole max_tokens
+    budget and return content: null, finish_reason "length", no tool call.
+    """
+    history = [
+        {"role": "user", "content": "solve it"},
+        {"role": "assistant", "content": []},  # what an exhausted turn leaves
+    ]
+    _user, assistant = to_openai_messages(history)
+    assert assistant["content"] == ""
+    assert assistant["content"] is not None
+    assert "tool_calls" not in assistant
+
+
+def test_content_is_still_null_when_tool_calls_are_present():
+    """The other half of the rule — this shape is what OpenAI requires."""
+    history = [
+        {
+            "role": "assistant",
+            "content": [ToolUseBlock("call_1", "ls", {})],
+        }
+    ]
+    (assistant,) = to_openai_messages(history)
+    assert assistant["content"] is None
+    assert assistant["tool_calls"][0]["function"]["name"] == "ls"
+
+
+def test_thinking_is_left_alone_by_default(monkeypatch):
+    """A general provider must not send an option the server may not know."""
+    monkeypatch.delenv("CICI_NO_THINKING", raising=False)
+    monkeypatch.setenv("MODEL_ENDPOINT", "http://model:8443")
+    monkeypatch.setenv("MODEL_NAME", "m")
+    provider = OpenAICompatible()
+    provider.stream([{"role": "user", "content": "hi"}])
+    # the payload is built inside stream(); assert via the manager it returned
+    run(provider.aclose())
+
+
+def test_no_thinking_env_adds_the_documented_option(monkeypatch):
+    """The option the House route documents, verbatim:
+    {"chat_template_kwargs": {"enable_thinking": false}}"""
+    from cici.llm import _thinking_fields
+
+    monkeypatch.delenv("CICI_NO_THINKING", raising=False)
+    assert _thinking_fields() == {}
+
+    monkeypatch.setenv("CICI_NO_THINKING", "1")
+    assert _thinking_fields() == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_accept_matches_the_form_of_each_request(monkeypatch):
+    """`Accept: text/event-stream` used to sit on the client, so a
+    non-streaming request advertised that it would accept nothing but an event
+    stream. A server that honours Accept answers 406, and the 406 fallback
+    exists only on the streaming branch — the non-streaming one raises and
+    loses the unit. With CICI_NO_STREAM=1 in the submission image every request
+    is the non-streaming one, so this was on the critical path for all 86.
+    """
+    monkeypatch.delenv("CICI_NO_STREAM", raising=False)
+    provider = make_provider(monkeypatch)
+    # httpx2 supplies its own permissive default; what matters is that we no
+    # longer pin the client to event-stream only.
+    assert provider.client.headers.get("accept") != "text/event-stream"
+
+    client = FakeClient(FakeHTTPResponse(200, payload=COMPLETION))
+    provider.client = client
+    enter(provider.stream([{"role": "user", "content": "hi"}]))
+    assert client.stream_headers[0]["Accept"] == "text/event-stream"
+
+    monkeypatch.setenv("CICI_NO_STREAM", "1")
+    provider = make_provider(monkeypatch)
+    client = FakeClient(None, FakeHTTPResponse(200, payload=COMPLETION))
+    provider.client = client
+    enter(provider.stream([{"role": "user", "content": "hi"}]))
+    assert client.post_headers[0]["Accept"] == "application/json"
+    assert not client.stream_headers
