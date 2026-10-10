@@ -539,6 +539,18 @@ class OpenAICompatible:
             base_url=self.base_url, headers=headers, timeout=timeout
         )
 
+        # The last turn's stop_reason, and how many turns ended truncated.
+        #
+        # `max_tokens` is indistinguishable from `end_turn` at agent.py:86 --
+        # both are "not tool_use", so both end the run. But they mean opposite
+        # things: one is "I finished", the other is "I was cut off mid tool
+        # call and nothing ran". Measured on 66 units, 111 turns ended this way
+        # and the units that hit it most delivered nothing at all. Recording it
+        # here is what lets the caller tell the two apart; see
+        # qfagent/runner.py's truncation recovery.
+        self.last_stop_reason = None
+        self.truncations = 0
+
         # Counted at the request layer, not the turn layer: a unit is allowed
         # 25 admitted requests and retries count, so turns are the wrong unit.
         #
@@ -604,7 +616,18 @@ class OpenAICompatible:
         self.streaming = False
         self.stream_refusal = reason
 
-    content_from_message = staticmethod(_content_from_shim)
+    def content_from_message(self, message):
+        """Unwrap the response, and record how the turn ended on the way past.
+
+        An instance method rather than the shared staticmethod because this is
+        the one place a provider is handed the finished message every turn --
+        agent.py:85 calls it on `self.provider` -- and recording here needs no
+        change to agent.py, which this project does not modify.
+        """
+        self.last_stop_reason = getattr(message, "stop_reason", None)
+        if self.last_stop_reason == "max_tokens":
+            self.truncations += 1
+        return _content_from_shim(message)
     text_from_message = staticmethod(_text_from_shim)
 
     async def aclose(self):

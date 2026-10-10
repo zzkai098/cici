@@ -14,6 +14,7 @@ import pytest
 from cici.agent import Agent
 from cici.llm import (
     OpenAICompatible,
+    ShimMessage,
     StubLLM,
     TextBlock,
     ToolUseBlock,
@@ -851,3 +852,31 @@ def test_accept_matches_the_form_of_each_request(monkeypatch):
     enter(provider.stream([{"role": "user", "content": "hi"}]))
     assert client.post_headers[0]["Accept"] == "application/json"
     assert not client.stream_headers
+
+
+# --- how the turn ended -------------------------------------------------------
+
+
+def test_the_provider_records_a_truncated_turn(monkeypatch):
+    """`max_tokens` must be distinguishable from a finished turn.
+
+    agent.py:86 breaks on anything that is not "tool_use", so a truncated turn
+    and a completed answer end the run identically. The caller can only tell
+    them apart if the provider wrote down which one it was, and the only place
+    a provider is handed the finished message every turn is here.
+    """
+    monkeypatch.setenv("MODEL_ENDPOINT", "http://model:8443")
+    monkeypatch.setenv("MODEL_NAME", "some-model")
+    provider = OpenAICompatible()
+    assert provider.last_stop_reason is None
+    assert provider.truncations == 0
+
+    provider.content_from_message(ShimMessage([TextBlock("half a scr")], "max_tokens"))
+    assert provider.last_stop_reason == "max_tokens"
+    assert provider.truncations == 1
+
+    # A normal turn must neither look truncated nor keep the old verdict.
+    provider.content_from_message(ShimMessage([TextBlock("done")], "end_turn"))
+    assert provider.last_stop_reason == "end_turn"
+    assert provider.truncations == 1
+    run(provider.aclose())
